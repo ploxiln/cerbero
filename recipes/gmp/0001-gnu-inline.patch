@@ -1,0 +1,25 @@
+From 04f52c9cbcc8a2efa1742a8dc072867a5aca9ebd Mon Sep 17 00:00:00 2001
+From: Pierce Lopez <pierce.lopez@gmail.com>
+Date: Tue, 26 Jun 2018 03:51:51 -0400
+Subject: [PATCH] need __gnu_inline__ attribute for __GMP_EXTERN_INLINE
+
+---
+ gmp-h.in | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/gmp-h.in b/gmp-h.in
+index eed6fe4..93edf73 100644
+--- a/gmp-h.in
++++ b/gmp-h.in
+@@ -420,7 +420,7 @@ typedef __mpq_struct *mpq_ptr;
+    for an inline too, so as to correctly specify "dllimport" on windows, in
+    case the function is called rather than inlined.  */
+ #ifdef __GNUC__
+-#define __GMP_EXTERN_INLINE      extern __inline__
++#define __GMP_EXTERN_INLINE      extern __inline__  __attribute__ ((__gnu_inline__))
+ #define __GMP_INLINE_PROTOTYPES  1
+ #endif
+ 
+-- 
+2.17.1
+

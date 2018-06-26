@@ -8,11 +8,11 @@ Subject: [PATCH] ios: fix build using .word for assembly constants
  1 file changed, 4 insertions(+)
 
 diff --git a/arm/ecc-521-modp.asm b/arm/ecc-521-modp.asm
-index c311a89..8cb5264 100644
+index fe30580..287cac4 100644
 --- a/arm/ecc-521-modp.asm
 +++ b/arm/ecc-521-modp.asm
-@@ -48,7 +48,11 @@ define(<N>, <lr>)
- 	C ecc_521_modp (const struct ecc_modulo *m, mp_limb_t *rp)
+@@ -35,7 +35,11 @@ define(<N>, <lr>)
+ 	C ecc_521_modp (const struct ecc_curve *ecc, mp_limb_t *rp)
  	.text
  .Lc511:
 +#ifdef __APPLE__
