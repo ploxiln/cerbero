@@ -32,3 +32,5 @@ class Recipe(recipe.Recipe):
             self.append_env['CFLAGS'] = ' -DMINGW_HAS_SECURE_API=1 '
         elif self.config.target_platform in Platform.DARWIN:
             self.config_sh = 'CFLAGS="$CFLAGS -DHAVE_STRNDUP" ./configure'
+        # if platform != linux ... elif windows ... is wrong! never had effect!
+        self.append_env['CFLAGS'] = ' -I%s/include' % self.config.build_tools_prefix
