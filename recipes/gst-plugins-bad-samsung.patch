@@ -1,0 +1,273 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pierce Lopez <pierce.lopez@gmail.com>
+Date: Mon, 23 Jul 2018 19:59:07 -0400
+Subject: [PATCH] samsung commercialization patch for gst-plugins-good
+
+---
+ 1 file changed
+
+diff --git a/gst-libs/gst/player/gstplayer.c b/gst-libs/gst/player/gstplayer.c
+index 8dac3e9f8..9c9c82f85 100644
+--- a/gst-libs/gst/player/gstplayer.c
++++ b/gst-libs/gst/player/gstplayer.c
+@@ -68,6 +68,10 @@ GST_DEBUG_CATEGORY_STATIC (gst_player_debug);
+ #define DEFAULT_POSITION_UPDATE_INTERVAL_MS 100
+ #define DEFAULT_AUDIO_VIDEO_OFFSET 0
+ 
++#define ENABLE_SECURE_LOG
++
++#define CHANGE_FOR_PRODUCT
++
+ GQuark
+ gst_player_error_quark (void)
+ {
+@@ -128,6 +132,9 @@ enum
+   SIGNAL_BUFFERING,
+   SIGNAL_END_OF_STREAM,
+   SIGNAL_ERROR,
++#ifdef CHANGE_FOR_PRODUCT
++  SIGNAL_ERROR_MSG,
++#endif
+   SIGNAL_WARNING,
+   SIGNAL_VIDEO_DIMENSIONS_CHANGED,
+   SIGNAL_MEDIA_INFO_UPDATED,
+@@ -449,6 +456,13 @@ gst_player_class_init (GstPlayerClass * klass)
+       G_SIGNAL_RUN_LAST | G_SIGNAL_NO_RECURSE | G_SIGNAL_NO_HOOKS, 0, NULL,
+       NULL, NULL, G_TYPE_NONE, 1, G_TYPE_ERROR);
+ 
++#ifdef CHANGE_FOR_PRODUCT
++  signals[SIGNAL_ERROR_MSG] =
++      g_signal_new ("error-msg", G_TYPE_FROM_CLASS (klass),
++      G_SIGNAL_RUN_LAST | G_SIGNAL_NO_RECURSE | G_SIGNAL_NO_HOOKS, 0, NULL,
++      NULL, NULL, G_TYPE_NONE, 1, G_TYPE_POINTER);
++#endif
++
+   signals[SIGNAL_VIDEO_DIMENSIONS_CHANGED] =
+       g_signal_new ("video-dimensions-changed", G_TYPE_FROM_CLASS (klass),
+       G_SIGNAL_RUN_LAST | G_SIGNAL_NO_RECURSE | G_SIGNAL_NO_HOOKS, 0, NULL,
+@@ -583,7 +597,9 @@ gst_player_set_uri_internal (gpointer user_data)
+ 
+   g_mutex_lock (&self->lock);
+ 
++#ifndef ENABLE_SECURE_LOG
+   GST_DEBUG_OBJECT (self, "Changing URI to '%s'", GST_STR_NULL (self->uri));
++#endif
+ 
+   g_object_set (self->playbin, "uri", self->uri, NULL);
+ 
+@@ -619,8 +635,10 @@ gst_player_set_suburi_internal (gpointer user_data)
+   gst_player_stop_internal (self, TRUE);
+   g_mutex_lock (&self->lock);
+ 
++#ifndef ENABLE_SECURE_LOG
+   GST_DEBUG_OBJECT (self, "Changing SUBURI to '%s'",
+       GST_STR_NULL (self->suburi));
++#endif
+ 
+   g_object_set (self->playbin, "suburi", self->suburi, NULL);
+   g_object_set (self->playbin, "uri",
+@@ -682,7 +700,9 @@ gst_player_set_property (GObject * object, guint prop_id,
+       self->suburi = NULL;
+ 
+       self->uri = g_value_dup_string (value);
++#ifndef ENABLE_SECURE_LOG
+       GST_DEBUG_OBJECT (self, "Set uri=%s", self->uri);
++#endif
+       g_mutex_unlock (&self->lock);
+ 
+       g_main_context_invoke_full (self->context, G_PRIORITY_DEFAULT,
+@@ -694,7 +714,9 @@ gst_player_set_property (GObject * object, guint prop_id,
+       g_free (self->suburi);
+ 
+       self->suburi = g_value_dup_string (value);
++#ifndef ENABLE_SECURE_LOG
+       GST_DEBUG_OBJECT (self, "Set suburi=%s", self->suburi);
++#endif
+       g_mutex_unlock (&self->lock);
+ 
+       g_main_context_invoke_full (self->context, G_PRIORITY_DEFAULT,
+@@ -753,8 +775,10 @@ gst_player_get_property (GObject * object, guint prop_id,
+       g_mutex_lock (&self->lock);
+       g_value_set_string (value, self->suburi);
+       g_mutex_unlock (&self->lock);
++#ifndef ENABLE_SECURE_LOG
+       GST_DEBUG_OBJECT (self, "Returning suburi=%s",
+           g_value_get_string (value));
++#endif
+       break;
+     case PROP_POSITION:{
+       gint64 position = 0;
+@@ -1019,6 +1043,14 @@ remove_ready_timeout_source (GstPlayer * self)
+   self->ready_timeout_source = NULL;
+ }
+ 
++#ifdef CHANGE_FOR_PRODUCT
++typedef struct
++{
++  GstPlayer *player;
++  GstMessage *msg;
++} MessageSignalData;
++#endif
++
+ typedef struct
+ {
+   GstPlayer *player;
+@@ -1036,6 +1068,19 @@ error_dispatch (gpointer user_data)
+   g_signal_emit (data->player, signals[SIGNAL_ERROR], 0, data->err);
+ }
+ 
++#ifdef CHANGE_FOR_PRODUCT
++static void
++message_dispatch (gpointer user_data)
++{
++  MessageSignalData *data = user_data;
++
++  if (data->player->inhibit_sigs)
++    return;
++
++  g_signal_emit (data->player, signals[SIGNAL_ERROR_MSG], 0, data->msg);
++}
++#endif
++
+ static void
+ free_error_signal_data (ErrorSignalData * data)
+ {
+@@ -1044,6 +1089,72 @@ free_error_signal_data (ErrorSignalData * data)
+   g_free (data);
+ }
+ 
++#ifdef CHANGE_FOR_PRODUCT
++static void
++free_message_signal_data (MessageSignalData * data)
++{
++  g_object_unref (data->player);
++  gst_message_unref (data->msg);
++  g_free (data);
++}
++
++static void
++emit_message (GstPlayer * self, GstMessage * msg)
++{
++
++  GError *error = NULL;
++  gchar* debug = NULL;
++  /* get error code */
++  gst_message_parse_error(msg, &error, &debug);
++
++  if(error)
++    GST_ERROR_OBJECT (self,"error : %s\n", error->message);
++
++  GST_ERROR_OBJECT (self,"debug : %s\n", debug);
++
++  if (g_signal_handler_find (self, G_SIGNAL_MATCH_ID,
++          signals[SIGNAL_ERROR_MSG], 0, NULL, NULL, NULL) != 0) {
++    MessageSignalData *data = g_new (MessageSignalData, 1);
++
++    data->player = g_object_ref (self);
++    data->msg = gst_message_copy (msg);
++    gst_player_signal_dispatcher_dispatch (self->signal_dispatcher, self,
++        message_dispatch, data, (GDestroyNotify) free_message_signal_data);
++  }
++
++  g_clear_error (&error);
++  g_free (debug);
++
++  remove_tick_source (self);
++  remove_ready_timeout_source (self);
++
++  self->target_state = GST_STATE_NULL;
++  self->current_state = GST_STATE_NULL;
++  self->is_live = FALSE;
++  self->is_eos = FALSE;
++  gst_element_set_state (self->playbin, GST_STATE_NULL);
++  change_state (self, GST_PLAYER_STATE_STOPPED);
++  self->buffering = 100;
++
++  g_mutex_lock (&self->lock);
++  if (self->media_info) {
++    g_object_unref (self->media_info);
++    self->media_info = NULL;
++  }
++
++  if (self->global_tags) {
++    gst_tag_list_unref (self->global_tags);
++    self->global_tags = NULL;
++  }
++
++  self->seek_pending = FALSE;
++  remove_seek_source (self);
++  self->seek_position = GST_CLOCK_TIME_NONE;
++  self->last_seek_time = GST_CLOCK_TIME_NONE;
++  g_mutex_unlock (&self->lock);
++}
++#endif
++
+ static void
+ emit_error (GstPlayer * self, GError * err)
+ {
+@@ -1152,11 +1263,17 @@ static void
+ error_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg, gpointer user_data)
+ {
+   GstPlayer *self = GST_PLAYER (user_data);
++#ifndef CHANGE_FOR_PRODUCT
+   GError *err, *player_err;
+   gchar *name, *debug, *message, *full_message;
++#endif
+ 
+   dump_dot_file (self, "error");
+ 
++#ifdef CHANGE_FOR_PRODUCT
++  /* Simply pass the GstMessage received from Gstreamer to Application */
++  emit_message (self, msg);
++#else
+   gst_message_parse_error (msg, &err, &debug);
+ 
+   name = gst_object_get_path_string (msg->src);
+@@ -1185,6 +1302,7 @@ error_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg, gpointer user_data)
+   g_free (name);
+   g_free (full_message);
+   g_free (message);
++#endif
+ }
+ 
+ static void
+@@ -1820,7 +1938,9 @@ element_cb (G_GNUC_UNUSED GstBus * bus, GstMessage * msg, gpointer user_data)
+     if (new_location) {
+       GstState target_state;
+ 
++#ifndef ENABLE_SECURE_LOG
+       GST_DEBUG_OBJECT (self, "Redirect to '%s'", new_location);
++#endif
+ 
+       /* Remember target state and restore after setting the URI */
+       target_state = self->target_state;
+@@ -2733,11 +2853,19 @@ gst_player_media_info_create (GstPlayer * self)
+       get_from_tags (self, media_info, get_container_format);
+   media_info->image_sample = get_from_tags (self, media_info, get_cover_sample);
+ 
++#ifdef ENABLE_SECURE_LOG
++  GST_DEBUG_OBJECT (self, "title: %s duration: %" GST_TIME_FORMAT
++      " seekable: %s live: %s container: %s image_sample %p",
++      media_info->title, GST_TIME_ARGS (media_info->duration),
++      media_info->seekable ? "yes" : "no", media_info->is_live ? "yes" : "no",
++      media_info->container, media_info->image_sample);
++#else
+   GST_DEBUG_OBJECT (self, "uri: %s title: %s duration: %" GST_TIME_FORMAT
+       " seekable: %s live: %s container: %s image_sample %p",
+       media_info->uri, media_info->title, GST_TIME_ARGS (media_info->duration),
+       media_info->seekable ? "yes" : "no", media_info->is_live ? "yes" : "no",
+       media_info->container, media_info->image_sample);
++#endif
+ 
+   GST_DEBUG_OBJECT (self, "end");
+   return media_info;
+@@ -4760,4 +4888,4 @@ gst_player_get_video_snapshot (GstPlayer * self,
+   }
+ 
+   return sample;
+-}
++}
+\ No newline at end of file
+-- 
+2.18.0
+

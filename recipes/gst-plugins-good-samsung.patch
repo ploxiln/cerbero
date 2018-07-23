@@ -1,0 +1,758 @@
+From 2f01c916013f91715183c26a91d9dbed12bbcc7e Mon Sep 17 00:00:00 2001
+From: Pierce Lopez <pierce.lopez@gmail.com>
+Date: Mon, 23 Jul 2018 22:33:06 -0400
+Subject: [PATCH] samsung commercialization patch for gst-plugins-good
+
+---
+ gst/rtp/gstrtph264depay.c           |  15 +++
+ gst/rtp/gstrtph264depay.h           |   7 ++
+ gst/rtpmanager/gstrtpjitterbuffer.c |  68 +++++++++++-
+ gst/rtpmanager/rtpjitterbuffer.c    |   6 ++
+ gst/rtsp/gstrtspsrc.c               | 162 +++++++++++++++++++++++++++-
+ gst/rtsp/gstrtspsrc.h               |  48 +++++++++
+ 6 files changed, 304 insertions(+), 2 deletions(-)
+
+diff --git a/gst/rtp/gstrtph264depay.c b/gst/rtp/gstrtph264depay.c
+index 6ce38205c..65bba8bad 100644
+--- a/gst/rtp/gstrtph264depay.c
++++ b/gst/rtp/gstrtph264depay.c
+@@ -39,6 +39,8 @@ GST_DEBUG_CATEGORY_STATIC (rtph264depay_debug);
+ #define DEFAULT_BYTE_STREAM   TRUE
+ #define DEFAULT_ACCESS_UNIT   FALSE
+ 
++#define CHANGE_FOR_PRODUCT
++
+ /* 3 zero bytes syncword */
+ static const guint8 sync_bytes[] = { 0, 0, 0, 1 };
+ 
+@@ -848,6 +850,19 @@ gst_rtp_h264_depay_handle_nal (GstRtpH264Depay * rtph264depay, GstBuffer * nal,
+   out_keyframe = keyframe;
+   out_timestamp = in_timestamp;
+ 
++#ifdef CHANGE_FOR_PRODUCT
++  /* Changes done to Drop initial Non-Key Frames (especially required for Live Feeds to avoid Corrupted Frame display)  */
++  if ((!rtph264depay->byte_stream) && (!rtph264depay->is_first_keyframe)) {
++    if (!keyframe) {
++      GST_WARNING_OBJECT (depayload, "Dropping Initial Non-Key Frames !!");
++      goto short_nal;
++    } else {
++      GST_WARNING_OBJECT (depayload, "Initial Key Frame found !!");
++      rtph264depay->is_first_keyframe = TRUE;
++    }
++  }
++#endif
++
+   if (!rtph264depay->byte_stream) {
+     if (nal_type == 7 || nal_type == 8) {
+       gst_rtp_h264_depay_add_sps_pps (rtph264depay,
+diff --git a/gst/rtp/gstrtph264depay.h b/gst/rtp/gstrtph264depay.h
+index ba413125a..0459c2ef4 100644
+--- a/gst/rtp/gstrtph264depay.h
++++ b/gst/rtp/gstrtph264depay.h
+@@ -24,6 +24,8 @@
+ #include <gst/base/gstadapter.h>
+ #include <gst/rtp/gstrtpbasedepayload.h>
+ 
++#define CHANGE_FOR_PRODUCT
++
+ G_BEGIN_DECLS
+ 
+ #define GST_TYPE_RTP_H264_DEPAY \
+@@ -67,6 +69,11 @@ struct _GstRtpH264Depay
+   GPtrArray *pps;
+   gboolean new_codec_data;
+ 
++#ifdef CHANGE_FOR_PRODUCT
++  /* to identify if the initial Key Frame has already arrived  */
++  gboolean is_first_keyframe;
++#endif
++
+   /* downstream allocator */
+   GstAllocator *allocator;
+   GstAllocationParams params;
+diff --git a/gst/rtpmanager/gstrtpjitterbuffer.c b/gst/rtpmanager/gstrtpjitterbuffer.c
+index 678210be9..a40f0c556 100644
+--- a/gst/rtpmanager/gstrtpjitterbuffer.c
++++ b/gst/rtpmanager/gstrtpjitterbuffer.c
+@@ -128,6 +128,8 @@ enum
+   LAST_SIGNAL
+ };
+ 
++#define CHANGE_FOR_PRODUCT
++
+ #define DEFAULT_LATENCY_MS          200
+ #define DEFAULT_DROP_ON_LATENCY     FALSE
+ #define DEFAULT_TS_OFFSET           0
+@@ -151,6 +153,9 @@ enum
+ #define DEFAULT_MAX_MISORDER_TIME   2000
+ #define DEFAULT_RFC7273_SYNC        FALSE
+ #define DEFAULT_FASTSTART_MIN_PACKETS 0
++#ifdef CHANGE_FOR_PRODUCT
++#define DEFAULT_FASTSTART_MIN_TIME    0
++#endif
+ 
+ #define DEFAULT_AUTO_RTX_DELAY (20 * GST_MSECOND)
+ #define DEFAULT_AUTO_RTX_TIMEOUT (40 * GST_MSECOND)
+@@ -181,7 +186,12 @@ enum
+   PROP_MAX_DROPOUT_TIME,
+   PROP_MAX_MISORDER_TIME,
+   PROP_RFC7273_SYNC,
++#ifndef CHANGE_FOR_PRODUCT
+   PROP_FASTSTART_MIN_PACKETS
++#else
++  PROP_FASTSTART_MIN_PACKETS,
++  PROP_FASTSTART_MIN_TIME
++#endif
+ };
+ 
+ #define JBUF_LOCK(priv)   G_STMT_START {			\
+@@ -374,6 +384,12 @@ struct _GstRtpJitterBufferPrivate
+   GstClockTime last_pts;
+   guint64 last_rtptime;
+   GstClockTime avg_jitter;
++
++#ifdef CHANGE_FOR_PRODUCT
++  /* for minimum time */
++  GstClockTime first_packet_received_time;
++  guint64 faststart_min_time;
++#endif
+ };
+ 
+ typedef enum
+@@ -891,6 +907,23 @@ gst_rtp_jitter_buffer_class_init (GstRtpJitterBufferClass * klass)
+           0, G_MAXUINT, DEFAULT_FASTSTART_MIN_PACKETS,
+           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+ 
++#ifdef CHANGE_FOR_PRODUCT
++  /**
++   * GstRtpJitterBuffer:faststart-min-time
++   *
++   * Minimum time in ms to start (this property can affect only
++   * as the faststart-min-packets property is enabled.)
++   *
++   * Since: 1.14
++   */
++  g_object_class_install_property (gobject_class, PROP_FASTSTART_MIN_TIME,
++	  g_param_spec_uint64 ("faststart-min-time", "Faststart minimum time",
++		  "Minimum time in ms to start (this property can affect only"
++		  "as the faststart-min-packets property is enabled.)",
++		  0, G_MAXUINT64, DEFAULT_FASTSTART_MIN_TIME,
++		  G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
++#endif
++
+   /**
+    * GstRtpJitterBuffer::request-pt-map:
+    * @buffer: the object which received the signal
+@@ -1018,6 +1051,9 @@ gst_rtp_jitter_buffer_init (GstRtpJitterBuffer * jitterbuffer)
+   priv->max_dropout_time = DEFAULT_MAX_DROPOUT_TIME;
+   priv->max_misorder_time = DEFAULT_MAX_MISORDER_TIME;
+   priv->faststart_min_packets = DEFAULT_FASTSTART_MIN_PACKETS;
++#ifdef CHANGE_FOR_PRODUCT
++  priv->faststart_min_time = DEFAULT_FASTSTART_MIN_TIME;
++#endif
+ 
+   priv->ts_offset_remainder = 0;
+   priv->last_dts = -1;
+@@ -3037,6 +3073,10 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
+         rtp_jitter_buffer_calculate_pts (priv->jbuf, dts, estimated_dts,
+         rtptime, gst_element_get_base_time (GST_ELEMENT_CAST (jitterbuffer)));
+ 
++#ifdef CHANGE_FOR_PRODUCT
++    priv->first_packet_received_time = gst_util_get_timestamp();
++#endif
++
+     /* we don't know what the next_in_seqnum should be, wait for the last
+      * possible moment to push this buffer, maybe we get an earlier seqnum
+      * while we wait */
+@@ -3202,7 +3242,19 @@ gst_rtp_jitter_buffer_chain (GstPad * pad, GstObject * parent,
+ 
+   /* Trigger fast start if needed */
+   if (gst_rtp_jitter_buffer_fast_start (jitterbuffer))
++#ifdef CHANGE_FOR_PRODUCT
++  {
++    if ((gst_util_get_timestamp() - priv->first_packet_received_time) > priv->faststart_min_time) {
++      GST_INFO_OBJECT (jitterbuffer, "min_time or min_packets is satisfied, now : %" GST_TIME_FORMAT,
++                                     GST_TIME_ARGS (gst_util_get_timestamp() - priv->first_packet_received_time));
++      head = TRUE;
++    } else
++      GST_INFO_OBJECT (jitterbuffer, "still waiting, now : %" GST_TIME_FORMAT,
++                                     GST_TIME_ARGS (gst_util_get_timestamp() - priv->first_packet_received_time));
++  }
++#else
+     head = TRUE;
++#endif
+ 
+   /* update timers */
+   update_timers (jitterbuffer, seqnum, dts, pts, do_next_seqnum,
+@@ -4674,6 +4726,13 @@ gst_rtp_jitter_buffer_set_property (GObject * object,
+       priv->faststart_min_packets = g_value_get_uint (value);
+       JBUF_UNLOCK (priv);
+       break;
++#ifdef CHANGE_FOR_PRODUCT
++    case PROP_FASTSTART_MIN_TIME:
++      JBUF_LOCK (priv);
++      priv->faststart_min_time = g_value_get_uint64 (value) * GST_MSECOND;
++      JBUF_UNLOCK (priv);
++      break;
++#endif
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -4820,6 +4879,13 @@ gst_rtp_jitter_buffer_get_property (GObject * object,
+       g_value_set_uint (value, priv->faststart_min_packets);
+       JBUF_UNLOCK (priv);
+       break;
++#ifdef CHANGE_FOR_PRODUCT
++    case PROP_FASTSTART_MIN_TIME:
++      JBUF_LOCK (priv);
++      g_value_set_uint64 (value, priv->faststart_min_time / GST_MSECOND);
++      JBUF_UNLOCK (priv);
++      break;
++#endif
+     default:
+       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
+       break;
+@@ -4846,4 +4912,4 @@ gst_rtp_jitter_buffer_create_stats (GstRtpJitterBuffer * jbuf)
+   JBUF_UNLOCK (priv);
+ 
+   return s;
+-}
++}
+\ No newline at end of file
+diff --git a/gst/rtpmanager/rtpjitterbuffer.c b/gst/rtpmanager/rtpjitterbuffer.c
+index f1187e2b6..9d5bf0a18 100644
+--- a/gst/rtpmanager/rtpjitterbuffer.c
++++ b/gst/rtpmanager/rtpjitterbuffer.c
+@@ -25,6 +25,8 @@
+ #include "rtpjitterbuffer.h"
+ 
+ GST_DEBUG_CATEGORY_STATIC (rtp_jitter_buffer_debug);
++#define CHANGE_FOR_PRODUCT
++
+ #define GST_CAT_DEFAULT rtp_jitter_buffer_debug
+ 
+ #define MAX_WINDOW	RTP_JITTER_BUFFER_MAX_WINDOW
+@@ -565,7 +567,11 @@ calculate_skew (RTPJitterBuffer * jbuf, guint64 ext_rtptime,
+   /* if the difference between the sender timeline and the receiver timeline
+    * changed too quickly we have to resync because the server likely restarted
+    * its timestamps. */
++#ifdef CHANGE_FOR_PRODUCT
++  if (ABS (delta - jbuf->skew) > (2 * GST_SECOND)) {
++#else
+   if (ABS (delta - jbuf->skew) > GST_SECOND) {
++#endif
+     GST_WARNING ("delta - skew: %" GST_TIME_FORMAT " too big, reset skew",
+         GST_TIME_ARGS (ABS (delta - jbuf->skew)));
+     rtp_jitter_buffer_resync (jbuf, time, gstrtptime, ext_rtptime, TRUE);
+diff --git a/gst/rtsp/gstrtspsrc.c b/gst/rtsp/gstrtspsrc.c
+index facdbb443..170700947 100644
+--- a/gst/rtsp/gstrtspsrc.c
++++ b/gst/rtsp/gstrtspsrc.c
+@@ -99,6 +99,8 @@
+ GST_DEBUG_CATEGORY_STATIC (rtspsrc_debug);
+ #define GST_CAT_DEFAULT (rtspsrc_debug)
+ 
++#define CHANGE_FOR_PRODUCT
++
+ static GstStaticPadTemplate rtptemplate = GST_STATIC_PAD_TEMPLATE ("stream_%u",
+     GST_PAD_SRC,
+     GST_PAD_SOMETIMES,
+@@ -336,6 +338,15 @@ gst_rtsp_nat_method_get_type (void)
+          "rtsp-status-reason", G_TYPE_STRING, GST_STR_NULL((response_msg)->type_data.response.reason), NULL)); \
+   } while (0)
+ 
++#ifdef CHANGE_FOR_PRODUCT
++#define RTSP_SRC_ERROR_RETURN(src, err_code, error_message,extra_info) \
++  do { \
++    GST_ELEMENT_ERROR_WITH_DETAILS((src), RESOURCE, FAILED, ("%s %s", error_message,extra_info),(NULL), \
++    ("rtsp-status-code", G_TYPE_UINT,err_code , \
++     "rtsp-status-reason", G_TYPE_STRING, error_message,NULL)); \
++  } while (0)
++#endif
++
+ static void gst_rtspsrc_finalize (GObject * object);
+ 
+ static void gst_rtspsrc_set_property (GObject * object, guint prop_id,
+@@ -5208,8 +5219,13 @@ receive_error:
+   {
+     gchar *str = gst_rtsp_strresult (res);
+ 
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++				GST_RTSPSRC_ERROR_SERVER_DISCONNECTED, "Could not receive message.", str);
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, READ, (NULL),
+         ("Could not receive message. (%s)", str));
++#endif
+     g_free (str);
+ 
+     gst_rtsp_message_unset (&message);
+@@ -5219,8 +5235,13 @@ handle_request_failed:
+   {
+     gchar *str = gst_rtsp_strresult (res);
+ 
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++				GST_RTSPSRC_ERROR_SERVICE_UNAVAILABLE, "Could not handle server message.", str);
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, WRITE, (NULL),
+         ("Could not handle server message. (%s)", str));
++#endif
+     g_free (str);
+     gst_rtsp_message_unset (&message);
+     return GST_FLOW_ERROR;
+@@ -5284,6 +5305,9 @@ gst_rtspsrc_loop_udp (GstRTSPSrc * src)
+         continue;
+       case GST_RTSP_ENET:
+         GST_DEBUG_OBJECT (src, "An ethernet problem occured.");
++#ifdef CHANGE_FOR_PRODUCT
++        goto receive_error;
++#endif
+       default:
+         GST_ELEMENT_WARNING (src, RESOURCE, READ, (NULL),
+             ("Unhandled return value %d.", res));
+@@ -5340,8 +5364,13 @@ connect_error:
+ 
+     src->conninfo.connected = FALSE;
+     if (res != GST_RTSP_EINTR) {
++#ifdef CHANGE_FOR_PRODUCT
++      RTSP_SRC_ERROR_RETURN (src,
++				GST_RTSPSRC_ERROR_CONNECTION_FAIL, "Could not connect to server.", str);
++#else
+       GST_ELEMENT_ERROR (src, RESOURCE, OPEN_READ_WRITE, (NULL),
+           ("Could not connect to server. (%s)", str));
++#endif
+       g_free (str);
+       ret = GST_FLOW_ERROR;
+     } else {
+@@ -5353,8 +5382,13 @@ receive_error:
+   {
+     gchar *str = gst_rtsp_strresult (res);
+ 
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN ( src,
++				GST_RTSPSRC_ERROR_SERVER_DISCONNECTED, "Could not receive message.", str);
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, READ, (NULL),
+         ("Could not receive message. (%s)", str));
++#endif
+     g_free (str);
+     return GST_FLOW_ERROR;
+   }
+@@ -5365,8 +5399,13 @@ handle_request_failed:
+ 
+     gst_rtsp_message_unset (&message);
+     if (res != GST_RTSP_EINTR) {
++#ifdef CHANGE_FOR_PRODUCT
++      RTSP_SRC_ERROR_RETURN (src,
++            GST_RTSPSRC_ERROR_SERVICE_UNAVAILABLE, "Could not handle server message.", str);
++#else
+       GST_ELEMENT_ERROR (src, RESOURCE, WRITE, (NULL),
+           ("Could not handle server message. (%s)", str));
++#endif
+       g_free (str);
+       ret = GST_FLOW_ERROR;
+     } else {
+@@ -5438,10 +5477,16 @@ no_protocols:
+   {
+     src->cur_protocols = 0;
+     /* no transport possible, post an error and stop */
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++				GST_RTSPSRC_ERROR_UNSUPPORTED_TRANSPORT, "Could not receive any UDP packets for seconds, maybe your firewall is blocking it.",
++												 "No other protocols to try.");
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, READ, (NULL),
+         ("Could not receive any UDP packets for %.4f seconds, maybe your "
+             "firewall is blocking it. No other protocols to try.",
+             gst_guint64_to_gdouble (src->udp_timeout) / 1000000.0));
++#endif
+     return GST_RTSP_ERROR;
+   }
+ open_failed:
+@@ -5821,8 +5866,13 @@ no_auth_available:
+   {
+     /* Output an error indicating that we couldn't connect because there were
+      * no supported authentication protocols */
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++				GST_RTSPSRC_ERROR_NOT_AUTHORIZED, "No supported authentication protocol was found", "Not Authorized");
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, OPEN_READ, (NULL),
+         ("No supported authentication protocol was found"));
++#endif
+     return FALSE;
+   }
+ no_user_pass:
+@@ -5909,8 +5959,13 @@ receive_error:
+         gchar *str = gst_rtsp_strresult (res);
+ 
+         if (res != GST_RTSP_EINTR) {
++#ifdef CHANGE_FOR_PRODUCT
++	   RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_SERVER_DISCONNECTED, "Could not receive message.", str);
++#else
+           GST_ELEMENT_ERROR (src, RESOURCE, READ, (NULL),
+               ("Could not receive message. (%s)", str));
++#endif
+         } else {
+           GST_WARNING_OBJECT (src, "receive interrupted");
+         }
+@@ -6237,14 +6292,24 @@ gst_rtspsrc_parse_methods (GstRTSPSrc * src, GstRTSPMessage * response)
+   /* ERRORS */
+ no_describe:
+   {
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_METHOD_NOT_ALLOWED, "Server does not support DESCRIBE.", "Not allowed.");
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, OPEN_READ, (NULL),
+         ("Server does not support DESCRIBE."));
++#endif
+     return FALSE;
+   }
+ no_setup:
+   {
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_METHOD_NOT_ALLOWED, "Server does not support SETUP.", "Not allowed.");
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, OPEN_READ, (NULL),
+         ("Server does not support SETUP."));
++#endif
+     return FALSE;
+   }
+ }
+@@ -6984,30 +7049,50 @@ gst_rtspsrc_setup_streams_start (GstRTSPSrc * src, gboolean async)
+   /* ERRORS */
+ no_protocols:
+   {
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_INVALID_PROTOCOL, "Could not connect to server, no protocols left", "Invalid Protocol");
++#else
+     /* no transport possible, post an error and stop */
+     GST_ELEMENT_ERROR (src, RESOURCE, READ, (NULL),
+         ("Could not connect to server, no protocols left"));
++#endif
+     return GST_RTSP_ERROR;
+   }
+ no_streams:
+   {
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_CONTENT_NOT_FOUND, "SDP contains no streams", "Content not Found.");
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, SETTINGS, (NULL),
+         ("SDP contains no streams"));
++#endif
+     return GST_RTSP_ERROR;
+   }
+ create_request_failed:
+   {
+     gchar *str = gst_rtsp_strresult (res);
+ 
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_BAD_REQUEST, "Could not create request.", "Bad Request");
++#else
+     GST_ELEMENT_ERROR (src, LIBRARY, INIT, (NULL),
+         ("Could not create request. (%s)", str));
++#endif
+     g_free (str);
+     goto cleanup_error;
+   }
+ setup_transport_failed:
+   {
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_BAD_REQUEST, "Could not setup transport.", "Bad Request");
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, SETTINGS, (NULL),
+         ("Could not setup transport."));
++#endif
+     res = GST_RTSP_ERROR;
+     goto cleanup_error;
+   }
+@@ -7015,8 +7100,13 @@ response_error:
+   {
+     const gchar *str = gst_rtsp_status_as_text (code);
+ 
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN ( src,
++					GST_RTSPSRC_ERROR_UNSUPPORTED_TRANSPORT,"Unsupported transport field Error from Server .",str);
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, WRITE, (NULL),
+         ("Error (%d): %s", code, GST_STR_NULL (str)));
++#endif
+     res = GST_RTSP_ERROR;
+     goto cleanup_error;
+   }
+@@ -7025,8 +7115,13 @@ send_error:
+     gchar *str = gst_rtsp_strresult (res);
+ 
+     if (res != GST_RTSP_EINTR) {
++#ifdef CHANGE_FOR_PRODUCT
++      RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_CONNECTION_FAIL, "Could not send message.", str);
++#else
+       GST_ELEMENT_ERROR (src, RESOURCE, WRITE, (NULL),
+           ("Could not send message. (%s)", str));
++#endif
+     } else {
+       GST_WARNING_OBJECT (src, "send interrupted");
+     }
+@@ -7037,15 +7132,25 @@ nothing_to_activate:
+   {
+     /* none of the available error codes is really right .. */
+     if (unsupported_real) {
++#ifdef CHANGE_FOR_PRODUCT
++      RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_UNSUPPORTED_MEDIA_TYPE, "No supported stream was found.", " You might need to install a GStreamer RTSP extension plugin for Real media streams.");
++#else
+       GST_ELEMENT_ERROR (src, STREAM, CODEC_NOT_FOUND,
+           (_("No supported stream was found. You might need to install a "
+                   "GStreamer RTSP extension plugin for Real media streams.")),
+           (NULL));
++#endif
+     } else {
++#ifdef CHANGE_FOR_PRODUCT
++      RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_UNSUPPORTED_MEDIA_TYPE, "No supported stream was found.", " You might need to allow more transport protocols or may otherwise be missing the right GStreamer RTSP extension plugin.");
++#else
+       GST_ELEMENT_ERROR (src, STREAM, CODEC_NOT_FOUND,
+           (_("No supported stream was found. You might need to allow "
+                   "more transport protocols or may otherwise be missing "
+                   "the right GStreamer RTSP extension plugin.")), (NULL));
++#endif
+     }
+     return GST_RTSP_ERROR;
+   }
+@@ -7452,8 +7557,13 @@ restart:
+   /* ERRORS */
+ no_url:
+   {
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_INVALID_URL, "No valid RTSP URL was provided", "Invalid URL.");
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, NOT_FOUND, (NULL),
+         ("No valid RTSP URL was provided"));
++#endif
+     goto cleanup_error;
+   }
+ connect_failed:
+@@ -7461,8 +7571,13 @@ connect_failed:
+     gchar *str = gst_rtsp_strresult (res);
+ 
+     if (res != GST_RTSP_EINTR) {
++#ifdef CHANGE_FOR_PRODUCT
++      RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_CONNECTION_FAIL, "Failed to connect.", str);
++#else
+       GST_ELEMENT_ERROR (src, RESOURCE, OPEN_READ_WRITE, (NULL),
+           ("Failed to connect. (%s)", str));
++#endif
+     } else {
+       GST_WARNING_OBJECT (src, "connect interrupted");
+     }
+@@ -7473,8 +7588,13 @@ create_request_failed:
+   {
+     gchar *str = gst_rtsp_strresult (res);
+ 
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_BAD_REQUEST, "Could not create request.", str);
++#else
+     GST_ELEMENT_ERROR (src, LIBRARY, INIT, (NULL),
+         ("Could not create request. (%s)", str));
++#endif
+     g_free (str);
+     goto cleanup_error;
+   }
+@@ -7492,15 +7612,25 @@ methods_error:
+   }
+ wrong_content_type:
+   {
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_OPTION_NOT_SUPPORTED, "Server does not support SDP. ", respcont);
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, SETTINGS, (NULL),
+         ("Server does not support SDP, got %s.", respcont));
++#endif
+     res = GST_RTSP_ERROR;
+     goto cleanup_error;
+   }
+ no_describe:
+   {
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_METHOD_NOT_ALLOWED, "Server can not provide an SDP.", "Not Allowed.");
++#else
+     GST_ELEMENT_ERROR (src, RESOURCE, SETTINGS, (NULL),
+         ("Server can not provide an SDP."));
++#endif
+     res = GST_RTSP_ERROR;
+     goto cleanup_error;
+   }
+@@ -7652,8 +7782,13 @@ create_request_failed:
+   {
+     gchar *str = gst_rtsp_strresult (res);
+ 
++#ifdef CHANGE_FOR_PRODUCT
++    RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_BAD_REQUEST, "Could not create request.", str);
++#else
+     GST_ELEMENT_ERROR (src, LIBRARY, INIT, (NULL),
+         ("Could not create request. (%s)", str));
++#endif
+     g_free (str);
+     goto close;
+   }
+@@ -7663,8 +7798,13 @@ send_error:
+ 
+     gst_rtsp_message_unset (&request);
+     if (res != GST_RTSP_EINTR) {
++#ifdef CHANGE_FOR_PRODUCT
++      RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_CONNECTION_FAIL, "Could not send message.", str);
++#else
+       GST_ELEMENT_ERROR (src, RESOURCE, WRITE, (NULL),
+           ("Could not send message. (%s)", str));
++#endif
+     } else {
+       GST_WARNING_OBJECT (src, "TEARDOWN interrupted");
+     }
+@@ -8096,8 +8236,13 @@ create_request_failed:
+   {
+     gchar *str = gst_rtsp_strresult (res);
+ 
++#ifdef CHANGE_FOR_PRODUCT
++      RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_BAD_REQUEST, "Could not create request. ", str);
++#else
+     GST_ELEMENT_ERROR (src, LIBRARY, INIT, (NULL),
+         ("Could not create request. (%s)", str));
++#endif
+     g_free (str);
+     goto done;
+   }
+@@ -8107,8 +8252,13 @@ send_error:
+ 
+     gst_rtsp_message_unset (&request);
+     if (res != GST_RTSP_EINTR) {
++#ifdef CHANGE_FOR_PRODUCT
++      RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_CONNECTION_FAIL, "Could not send message.", str);
++#else
+       GST_ELEMENT_ERROR (src, RESOURCE, WRITE, (NULL),
+           ("Could not send message. (%s)", str));
++#endif
+     } else {
+       GST_WARNING_OBJECT (src, "PLAY interrupted");
+     }
+@@ -8225,8 +8375,13 @@ create_request_failed:
+   {
+     gchar *str = gst_rtsp_strresult (res);
+ 
++#ifdef CHANGE_FOR_PRODUCT
++      RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_BAD_REQUEST, "Could not create request.", str);
++#else
+     GST_ELEMENT_ERROR (src, LIBRARY, INIT, (NULL),
+         ("Could not create request. (%s)", str));
++#endif
+     g_free (str);
+     goto done;
+   }
+@@ -8236,8 +8391,13 @@ send_error:
+ 
+     gst_rtsp_message_unset (&request);
+     if (res != GST_RTSP_EINTR) {
++#ifdef CHANGE_FOR_PRODUCT
++      RTSP_SRC_ERROR_RETURN (src,
++					GST_RTSPSRC_ERROR_CONNECTION_FAIL, "Could not send message.", str);
++#else
+       GST_ELEMENT_ERROR (src, RESOURCE, WRITE, (NULL),
+           ("Could not send message. (%s)", str));
++#endif
+     } else {
+       GST_WARNING_OBJECT (src, "PAUSE interrupted");
+     }
+@@ -8982,4 +9142,4 @@ gst_rtspsrc_print_sdp_message (GstRTSPSrc * src, const GstSDPMessage * msg)
+     }
+   }
+   GST_LOG_OBJECT (src, "--------------------------------------------");
+-}
++}
+\ No newline at end of file
+diff --git a/gst/rtsp/gstrtspsrc.h b/gst/rtsp/gstrtspsrc.h
+index 4e5adeff7..3c6c61336 100644
+--- a/gst/rtsp/gstrtspsrc.h
++++ b/gst/rtsp/gstrtspsrc.h
+@@ -53,6 +53,8 @@ G_BEGIN_DECLS
+ 
+ #include "gstrtspext.h"
+ 
++#define CHANGE_FOR_PRODUCT
++
+ #define GST_TYPE_RTSPSRC \
+   (gst_rtspsrc_get_type())
+ #define GST_RTSPSRC(obj) \
+@@ -77,6 +79,52 @@ typedef struct _GstRTSPSrcClass GstRTSPSrcClass;
+ #define GST_RTSP_STREAM_LOCK(rtsp)       (g_rec_mutex_lock (GST_RTSP_STREAM_GET_LOCK(rtsp)))
+ #define GST_RTSP_STREAM_UNLOCK(rtsp)     (g_rec_mutex_unlock (GST_RTSP_STREAM_GET_LOCK(rtsp)))
+ 
++#ifdef CHANGE_FOR_PRODUCT
++typedef enum {
++  GST_RTSPSRC_ERROR_NONE = 0,
++  GST_RTSPSRC_ERROR_CONNECTION_FAIL,
++  GST_RTSPSRC_ERROR_SERVER_DISCONNECTED,
++  GST_RTSPSRC_ERROR_INVALID_PROTOCOL,
++  GST_RTSPSRC_ERROR_INVALID_URL,
++  GST_RTSPSRC_ERROR_OUT_OF_MEMORIES,
++  GST_RTSPSRC_ERROR_BAD_REQUEST,
++  GST_RTSPSRC_ERROR_NOT_AUTHORIZED,
++  GST_RTSPSRC_ERROR_PAYMENT_REQUIRED,
++  GST_RTSPSRC_ERROR_FORBIDDEN,
++  GST_RTSPSRC_ERROR_CONTENT_NOT_FOUND,
++  GST_RTSPSRC_ERROR_METHOD_NOT_ALLOWED,
++  GST_RTSPSRC_ERROR_NOT_ACCEPTABLE,
++  GST_RTSPSRC_ERROR_PROXY_AUTHENTICATION_REQUIRED,
++  GST_RTSPSRC_ERROR_SERVER_TIMEOUT,
++  GST_RTSPSRC_ERROR_GONE,
++  GST_RTSPSRC_ERROR_LENGTH_REQUIRED,
++  GST_RTSPSRC_ERROR_PRECONDITION_FAILED,
++  GST_RTSPSRC_ERROR_REQUEST_ENTITY_TOO_LARGE,
++  GST_RTSPSRC_ERROR_REQUEST_URI_TOO_LARGE,
++  GST_RTSPSRC_ERROR_UNSUPPORTED_MEDIA_TYPE,
++  GST_RTSPSRC_ERROR_PARAMETER_NOT_UNDERSTOOD,
++  GST_RTSPSRC_ERROR_CONFERENCE_NOT_FOUND,
++  GST_RTSPSRC_ERROR_NOT_ENOUGH_BANDWIDTH,
++  GST_RTSPSRC_ERROR_NO_SESSION_ID,
++  GST_RTSPSRC_ERROR_METHOD_NOT_VALID_IN_THIS_STATE,
++  GST_RTSPSRC_ERROR_HEADER_FIELD_NOT_VALID_FOR_SOURCE,
++  GST_RTSPSRC_ERROR_INVALID_RANGE,
++  GST_RTSPSRC_ERROR_PARAMETER_IS_READONLY,
++  GST_RTSPSRC_ERROR_AGGREGATE_OP_NOT_ALLOWED,
++  GST_RTSPSRC_ERROR_ONLY_AGGREGATE_OP_ALLOWED,
++  GST_RTSPSRC_ERROR_UNSUPPORTED_TRANSPORT,
++  GST_RTSPSRC_ERROR_DESTINATION_UNREACHABLE,
++  GST_RTSPSRC_ERROR_INTERNAL_SERVER_ERROR,
++  GST_RTSPSRC_ERROR_NOT_IMPLEMENTED,
++  GST_RTSPSRC_ERROR_BAD_GATEWAY,
++  GST_RTSPSRC_ERROR_SERVICE_UNAVAILABLE,
++  GST_RTSPSRC_ERROR_GATEWAY_TIME_OUT,
++  GST_RTSPSRC_ERROR_RTSP_VERSION_NOT_SUPPORTED,
++  GST_RTSPSRC_ERROR_OPTION_NOT_SUPPORTED
++}_GstRTSPSrcError;
++typedef _GstRTSPSrcError GstRTSPSrcError;
++#endif
++
+ typedef struct _GstRTSPConnInfo GstRTSPConnInfo;
+ 
+ struct _GstRTSPConnInfo {
+-- 
+2.18.0
+

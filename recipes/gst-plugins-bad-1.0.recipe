@@ -32,6 +32,7 @@ class Recipe(custom.GStreamer):
             'soundtouch', 'vo-aacenc', 'librsvg', 'openjpeg', 'openssl',
             'spandsp', 'webrtc-audio-processing', 'sbc', 'ladspa']
     use_system_libs = True
+    patches = ['gst-plugins-bad-samsung.patch']
 
     files_lang = ['gst-plugins-bad-1.0']
 
